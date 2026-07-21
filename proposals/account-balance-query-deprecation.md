@@ -25,19 +25,21 @@ None.
 
 ### `AccountBalanceQuery`
 
-No fields or methods added or removed. `@deprecated` added to the class-level JSDoc. `execute()` now throws.
+No fields or methods added or removed. The class is marked deprecated in each SDK's idiomatic way (the
+meta-language defines no deprecation annotation), and `execute()` now throws.
 
 ```
-@deprecated AccountBalanceQuery is no longer supported. Use the mirror node REST API
-            to retrieve account balances. This class will be removed in a future release.
+@@oneOrNoneOf(accountId, contractId)
 AccountBalanceQuery {
-    AccountId | null    accountId
-    ContractId | null   contractId
+    @@nullable accountId: AccountId
+    @@nullable contractId: ContractId
 
-    AccountBalanceQuery setAccountId(accountId: AccountId | string)
-    AccountBalanceQuery setContractId(contractId: ContractId | string)
+    AccountBalanceQuery setAccountId(accountId: AccountId)
+    AccountBalanceQuery setContractId(contractId: ContractId)
 
-    Promise<AccountBalance> execute(client: Client)  // now throws — see Internal Changes
+    @@async
+    @@throws(deprecated-query-error)
+    AccountBalance execute(client: Client)
 }
 ```
 
@@ -47,7 +49,8 @@ AccountBalanceQuery {
 
 ### Constructor — deprecation warning
 
-A `console.warn()` is added to the constructor, consistent with the existing SDK pattern (e.g., `Executable.setMaxRetries`, `ManagedNetwork.setNetworkName`):
+Each SDK emits its idiomatic deprecation warning when the query is constructed (precedent in the JS SDK:
+`console.warn`, as used by `Executable.setMaxRetries` and `ManagedNetwork.setNetworkName`):
 
 ```
 Deprecated: AccountBalanceQuery is no longer supported. Use the mirror node REST API to retrieve account balances.
@@ -55,13 +58,16 @@ Deprecated: AccountBalanceQuery is no longer supported. Use the mirror node REST
 
 ### Execute — hard error
 
-`_execute()` (and equivalent internal dispatch methods) are overridden to reject/throw immediately without making any network call, following the `AccountAllowanceAdjustTransaction` precedent:
+The internal execution path is overridden to fail immediately without making any network call (precedent in the
+JS SDK: `AccountAllowanceAdjustTransaction` overriding `_execute()`):
 
 ```
 Error: AccountBalanceQuery is no longer supported. Use the mirror node REST API to retrieve account balances.
 ```
 
-The `@deprecated` tag on the class causes IDEs and linters (`eslint-plugin-deprecation`, already configured in the JS SDK) to surface a diagnostic at every call site.
+Each SDK marks the class deprecated in its idiomatic way (e.g., JSDoc `@deprecated`, Java `@Deprecated`,
+Rust `#[deprecated]`) so IDEs and linters surface a diagnostic at every call site — in the JS SDK,
+`eslint-plugin-deprecation` is already configured for this.
 
 ### Response Codes / Transaction Retry
 

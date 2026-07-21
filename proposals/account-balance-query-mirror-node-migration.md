@@ -55,31 +55,37 @@ A `BlockNodeAccountBalanceQuery` class is reserved for a future proposal once bl
 
 ### `AccountBalanceQuery` — deprecated
 
-`AccountBalanceQuery` is marked `@deprecated` across all SDKs. Its implementation and behavior are **unchanged** — it continues to issue gRPC calls to consensus nodes for the duration of the deprecation window. No fields or methods are removed. SDKs should emit a deprecation warning on construction or first `execute()` call pointing developers to `MirrorNodeAccountBalanceQuery`.
+`AccountBalanceQuery` is marked deprecated across all SDKs. Its implementation and behavior are **unchanged** — it continues to issue gRPC calls to consensus nodes for the duration of the deprecation window. No fields or methods are removed. SDKs should emit a deprecation warning on construction or first `execute()` call pointing developers to `MirrorNodeAccountBalanceQuery`.
 
 ```
-@deprecated Use MirrorNodeAccountBalanceQuery instead.
+@@oneOrNoneOf(accountId, contractId)
 AccountBalanceQuery {
-    AccountId | null    accountId     // unchanged
-    ContractId | null   contractId    // unchanged
+    @@nullable accountId: AccountId     // unchanged
+    @@nullable contractId: ContractId   // unchanged
 
-    AccountBalanceQuery setAccountId(accountId: AccountId | string)
-    AccountBalanceQuery setContractId(contractId: ContractId | string)
+    AccountBalanceQuery setAccountId(accountId: AccountId)
+    AccountBalanceQuery setContractId(contractId: ContractId)
 
-    Promise<AccountBalance> execute(client: Client)
+    @@async
+    AccountBalance execute(client: Client)
 }
 ```
 
+The meta-language defines no deprecation annotation; each SDK marks the class deprecated in its idiomatic way
+(e.g., JSDoc `@deprecated`, Java `@Deprecated`, Rust `#[deprecated]`).
+
 ### `AccountBalance` — `tokenDecimals` deprecated
 
-`tokenDecimals` is retained on `AccountBalance` so that existing code using `AccountBalanceQuery` continues to compile and run unchanged during the deprecation window. When using the new `MirrorNodeAccountBalanceQuery`, `tokenDecimals` will always be empty (the mirror node account balance endpoint does not return decimals). SDKs should mark it `@deprecated`.
+`tokenDecimals` is retained on `AccountBalance` so that existing code using `AccountBalanceQuery` continues to
+compile and run unchanged during the deprecation window. When using the new `MirrorNodeAccountBalanceQuery`,
+`tokenDecimals` will always be empty (the mirror node account balance endpoint does not return decimals). SDKs
+should mark it deprecated in their idiomatic way.
 
 ```
 AccountBalance {
-    Hbar            hbars           // unchanged
-    TokenBalanceMap tokens          // unchanged
-    @deprecated
-    TokenDecimalMap tokenDecimals   // empty when returned by MirrorNodeAccountBalanceQuery
+    hbars: Hbar                     // unchanged
+    tokens: TokenBalanceMap         // unchanged
+    tokenDecimals: TokenDecimalMap  // deprecated — empty when returned by MirrorNodeAccountBalanceQuery
 }
 ```
 
@@ -89,14 +95,19 @@ AccountBalance {
 
 ### `MirrorNodeAccountBalanceQuery` implementation
 
-The class does not extend `Query`. It directly uses `fetch` (or the SDK's equivalent HTTP abstraction) and `client.mirrorRestApiBaseUrl` from the client's mirror network, following the same structure as `MirrorNodeContractCallQuery` and `FeeEstimateQuery`.
+The class does not extend `Query`. It uses the SDK's HTTP abstraction and the mirror node REST base URL from the
+client's mirror network configuration, following the structure of the existing mirror node REST queries
+(precedent in the JS SDK: `MirrorNodeContractCallQuery`, `FeeEstimateQuery`).
 
 **Request routing:**
 
 1. If `accountId` is set:
-   - Issue `GET /api/v1/accounts/{accountId}` where `accountId` is the string form of the `AccountId` (shard.realm.num, EVM address, or alias — all accepted by the mirror node).
+   - Issue `GET /api/v1/accounts/{accountId}` where `accountId` is the string form of the `AccountId`
+     (shard.realm.num, EVM address, or alias — all accepted by the mirror node).
    - Parse `balance.balance` (tinybars) → `AccountBalance.hbars`.
-   - Parse `balance.tokens[]` → `AccountBalance.tokens` (TokenBalanceMap), following `next` pagination links until exhausted.
+   - Issue `GET /api/v1/accounts/{accountId}/tokens` and follow `links.next` until it is absent, accumulating
+     all entries into `AccountBalance.tokens` (`TokenBalanceMap`). The `balance.tokens` array embedded in the
+     account response is a truncated preview and must not be used as the source of token balances.
    - Leave `AccountBalance.tokenDecimals` empty.
 
 2. If `contractId` is set:
@@ -104,17 +115,14 @@ The class does not extend `Query`. It directly uses `fetch` (or the SDK's equiva
    - Parse `balance` (tinybars) → `AccountBalance.hbars`.
    - Return an empty `TokenBalanceMap` (the mirror node contracts endpoint does not expose token balances).
 
-**Mirror response shape (account path):**
+**Mirror response shape (tokens path):**
 
 ```json
 {
-  "balance": {
-    "balance": 123456789,
-    "tokens": [
-      { "token_id": "0.0.12345", "balance": 500 },
-      { "token_id": "0.0.67890", "balance": 100 }
-    ]
-  },
+  "tokens": [
+    { "token_id": "0.0.12345", "balance": 500 },
+    { "token_id": "0.0.67890", "balance": 100 }
+  ],
   "links": { "next": "/api/v1/accounts/0.0.12345/tokens?limit=25&..." }
 }
 ```
@@ -125,7 +133,10 @@ The mirror node `GET /api/v1/accounts/{id}` response does not include token deci
 
 ### Pagination
 
-The `balance.tokens` array in the mirror node account response is paginated. `MirrorNodeAccountBalanceQuery` must follow `links.next` until it is absent, accumulating all token entries before constructing the `TokenBalanceMap`. This matches the pagination behavior of `AddressBookQueryWeb`.
+Token balances are paginated by the mirror node. `MirrorNodeAccountBalanceQuery` must follow `links.next` on
+`GET /api/v1/accounts/{id}/tokens` until it is absent, accumulating all token entries before constructing the
+`TokenBalanceMap`. Note that `links.next` on the account endpoint itself paginates the account's transactions,
+not its token balances.
 
 ### Eventual consistency
 
@@ -207,7 +218,7 @@ for (const [tokenId, amount] of balance.tokens) {
 
 ```javascript
 const balance = await new MirrorNodeAccountBalanceQuery()
-    .setAccountId("0x00000000000000000000000000000000000bc614e")
+    .setAccountId("0x0000000000000000000000000000000000bc614e")
     .execute(client);
 
 console.log(`HBAR balance: ${balance.hbars.toString()}`);
