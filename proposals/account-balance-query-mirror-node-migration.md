@@ -25,20 +25,25 @@ The new class follows the naming and structural convention already established i
 A new standalone query class that fetches account or contract balance from the mirror node REST API. Does not extend the base `Query` class (which carries consensus-node gRPC machinery). Follows the same pattern as `MirrorNodeContractCallQuery`.
 
 ```
+@@oneOrNoneOf(accountId, contractId)
 MirrorNodeAccountBalanceQuery {
-    AccountId | null    accountId
-    ContractId | null   contractId
+    @@nullable accountId: AccountId
+    @@nullable contractId: ContractId
 
-    MirrorNodeAccountBalanceQuery setAccountId(accountId: AccountId | string)
-    MirrorNodeAccountBalanceQuery setContractId(contractId: ContractId | string)
+    MirrorNodeAccountBalanceQuery setAccountId(accountId: AccountId)
+    MirrorNodeAccountBalanceQuery setContractId(contractId: ContractId)
 
-    Promise<AccountBalance> execute(client: Client)
+    @@async
+    @@throws(invalid-argument-error, not-found-error)
+    AccountBalance execute(client: Client)
 }
 ```
 
-`setAccountId` accepts any form `AccountId.fromString(...)` accepts: `shard.realm.num`, EVM address (`0x...`), or public key alias. The mirror node natively resolves all three, which is an improvement over the consensus node path.
+`accountId` accepts any form the SDK's `AccountId` string parsing accepts: `shard.realm.num`, EVM address
+(`0x...`), or public key alias. The mirror node natively resolves all three, which is an improvement over the
+consensus node path.
 
-`setContractId` routes to `GET /api/v1/contracts/{contractId}` instead; see Internal Changes.
+Setting `contractId` routes the query to `GET /api/v1/contracts/{contractId}` instead; see Internal Changes.
 
 ### Future placeholder: `BlockNodeAccountBalanceQuery`
 
