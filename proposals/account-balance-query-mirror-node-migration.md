@@ -6,6 +6,8 @@
 
 The new class follows the naming and structural convention already established in the SDKs for mirror node REST queries (`MirrorNodeContractCallQuery`, `MirrorNodeContractEstimateQuery`). The existing `AccountBalanceQuery` is marked deprecated but not removed, giving developers a migration window. A future `BlockNodeAccountBalanceQuery` is noted as a named placeholder for when block node infrastructure is available across the network.
 
+**Relationship to the companion proposal:** The companion [AccountBalanceQuery Deprecation](./account-balance-query-deprecation.md) proposal makes `execute()` fail immediately with a hard error, while this proposal keeps `AccountBalanceQuery` fully functional during a migration window. The two are mutually exclusive strategies for retiring the consensus-node balance path; only one of them can be adopted.
+
 **Date Submitted:** 2026-07-15
 
 **Related references:**
