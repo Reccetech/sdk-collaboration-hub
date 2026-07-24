@@ -8,9 +8,13 @@ Removal of the class is out of scope and will be addressed in a future proposal.
 
 **Date Submitted:** 2026-07-15
 
+**Target deprecation date:** September 2025
+
 **Related references:**
 - [Hedera blog: Migrating from AccountBalanceQuery](https://hedera.com/blog/migrating-from-accountbalancequery-what-you-need-to-know/)
 - [Companion proposal: Mirror node account balance query](./account-balance-query-mirror-node-migration.md)
+- [Network node health report proposal](./network-node-health-report.md) — introduces the replacement `ping()` / `pingAll()` liveness mechanism
+- [hiero-ledger/hiero-consensus-node #26457](https://github.com/hiero-ledger/hiero-consensus-node/issues/26457) — CN-side removal of `GetAccountBalance` from throttle configuration
 - Precedent in JS SDK: `src/account/AccountAllowanceAdjustTransaction.js`
 
 ---
@@ -69,9 +73,17 @@ Each SDK marks the class deprecated in its idiomatic way (e.g., JSDoc `@deprecat
 Rust `#[deprecated]`) so IDEs and linters surface a diagnostic at every call site — in the JS SDK,
 `eslint-plugin-deprecation` is already configured for this.
 
+### `Client.ping()` / `Client.pingAll()` — replacement required
+
+`Client.ping()` and `Client.pingAll()` currently use `AccountBalanceQuery` internally as a liveness probe across all SDK implementations. Once `AccountBalanceQuery` is deprecated and the network throttle is removed, these methods will fail. This must be addressed in all SDK languages as part of this work — not deferred.
+
+Each SDK must replace the `AccountBalanceQuery` probe with `NetworkService/getVersionInfo` before the September deprecation date. This RPC is free, requires no entity ID, is available on every consensus node, and tests the full gRPC path end-to-end — a faithful substitute for what the ping probe needs to do. Go and Java SDKs already have `NetworkVersionQuery` wrapping this RPC. The [network node health report proposal](./network-node-health-report.md) standardises the public `ping()` / `pingAll()` API surface as part of this replacement.
+
+An XTS dry run (July 2025) confirmed that failing to replace this probe breaks Solo's consensus-node readiness checks and connectivity tests. SDK teams should audit all internal uses of `AccountBalanceQuery` — not only the public `ping()` path — before the deprecation date.
+
 ### Response Codes / Transaction Retry
 
-Not applicable — no network request is made.
+Not applicable — no network request is made by `execute()`.
 
 ---
 
@@ -81,10 +93,11 @@ Not applicable — no network request is made.
 2. Given `execute()` is called on an `AccountBalanceQuery`, then the promise rejects with an `Error` containing `"AccountBalanceQuery is no longer supported. Use the mirror node REST API to retrieve account balances."`.
 3. Given `execute()` is called on an `AccountBalanceQuery`, then no network call to any consensus node is made.
 4. Given code migrated to the mirror node REST API for account balance retrieval, then no deprecation warning or error is emitted.
+5. Given `AccountBalanceQuery` is deprecated, when `client.ping(nodeId)` or `client.pingAll()` is called, then the call succeeds using the replacement liveness probe and no `deprecated-query-error` is thrown.
 
 ### TCK
 
-Tests 1–3 should have corresponding issues in `hiero-ledger/hiero-sdk-tck`. Test 3 is the critical integration check confirming the gRPC path is fully bypassed.
+Tests 1–3 should have corresponding issues in `hiero-ledger/hiero-sdk-tck`. Test 3 is the critical integration check confirming the gRPC path is fully bypassed. Test 5 should be validated against a live network to confirm the replacement probe is accepted.
 
 ---
 

@@ -116,7 +116,7 @@ Iterates the client's internal node list and constructs one `NodeHealth` snapsho
 
 `ping()` sends a lightweight gRPC request to the target node and updates its backoff on success or failure. `pingAll()` calls `ping()` for each node in parallel and swallows individual failures.
 
-The existing Go and Java implementations use `AccountBalanceQuery` as the probe request (precedent: `sdk/client.go` and `Client.java`). If `AccountBalanceQuery` is removed as part of the companion [AccountBalanceQuery Deprecation](./account-balance-query-deprecation.md) proposal, SDKs must replace the probe with another lightweight gRPC call (e.g., `CryptoGetInfo` or a dedicated health-check RPC) before `AccountBalanceQuery` is fully removed.
+The existing Go and Java implementations use `AccountBalanceQuery` as the probe request (precedent: `sdk/client.go` and `Client.java`). As part of the companion [AccountBalanceQuery Deprecation](./account-balance-query-deprecation.md) proposal, all SDKs must replace this probe with `NetworkService/getVersionInfo` before the September 2025 deprecation date. This RPC is free, requires no entity ID, and is available on every consensus node. Go and Java SDKs already have `NetworkVersionQuery` wrapping this RPC; JS will need to call it directly or through an equivalent wrapper.
 
 ### JS SDK — prerequisite bug fix
 
@@ -126,7 +126,7 @@ One pre-existing bug in `ManagedNode.js` affects `NodeHealth` field accuracy and
 
 ### Response Codes
 
-No new consensus node response codes are introduced. `ping()` may surface any gRPC status that `AccountBalanceQuery` already handles. `getNetworkHealth()` makes no network calls and has no error codes.
+No new consensus node response codes are introduced. `ping()` may surface any gRPC status that `NetworkService/getVersionInfo` returns. `getNetworkHealth()` makes no network calls and has no error codes.
 
 #### Transaction Retry
 
