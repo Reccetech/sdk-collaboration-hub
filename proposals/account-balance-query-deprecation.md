@@ -9,7 +9,7 @@ This proposal deprecates `AccountBalanceQuery` across all Hiero SDKs: the class 
 ### Delivery stages
 
 **Stage 1 — Replace the `ping()` / `pingAll()` probe (before August 13, 2026)**
-Replace the `AccountBalanceQuery` liveness probe inside `Client.ping()` and `Client.pingAll()` with `NetworkService/getVersionInfo`. This is a purely internal change with no public API impact. It must ship before the release 77 testnet rollout to avoid breaking Solo readiness checks and connectivity tests.
+Replace the `AccountBalanceQuery` liveness probe inside `Client.ping()` and `Client.pingAll()` with `TransactionReceiptQuery` using `TransactionID` `0.0.0@0.0`. This is a purely internal change with no public API impact. It must ship before the release 77 testnet rollout to avoid breaking Solo readiness checks and connectivity tests.
 
 **Stage 2 — Deprecate `AccountBalanceQuery` in the SDK (at or before September 9, 2026)**
 Mark `AccountBalanceQuery` deprecated and override `execute()` to throw immediately. Stage 2 can ship independently of Stage 1 in any release, but Stage 1 must be complete first.
@@ -77,9 +77,11 @@ Error: AccountBalanceQuery is no longer supported. Use the mirror node REST API 
 
 ### `Client.ping()` / `Client.pingAll()` — Stage 1
 
-All SDKs must replace the `AccountBalanceQuery` probe inside `ping()` and `pingAll()` with `NetworkService/getVersionInfo`. This RPC is free, requires no entity ID, and is available on every consensus node. Go and Java already have `NetworkVersionQuery` wrapping this RPC; JS will call it directly or through an equivalent wrapper.
+All SDKs must replace the `AccountBalanceQuery` probe inside `ping()` and `pingAll()` with `TransactionReceiptQuery` (`CryptoService/getTransactionReceipts`) using the fixed `TransactionID` `0.0.0@0.0`. This ID can never exist: account `0.0.0` is not created on the network and Unix epoch 0 predates Hedera's September 2019 mainnet launch. The query is free and available on every consensus node. A healthy node returns `RECEIPT_NOT_FOUND`; the probe treats this as success. A node that is degraded or unreachable fails at the gRPC layer, which the probe treats as failure. All SDKs already have `TransactionReceiptQuery` wrapper classes.
 
-An XTS dry run (July 2025) confirmed that failing to make this replacement breaks Solo's consensus-node readiness checks. SDK teams should also audit any other internal uses of `AccountBalanceQuery` beyond the public `ping()` path.
+The standard gRPC health check protocol (`grpc.health.v1.Health/Check`) was evaluated and confirmed not implemented on Hedera consensus nodes (verified against 5 mainnet nodes, July 2026).
+
+An XTS dry run (July 2025) confirmed that failing to make this replacement breaks Solo's consensus-node readiness checks. SDK teams should audit all internal uses of `AccountBalanceQuery` — not only the public `ping()` path.
 
 ### Response Codes / Transaction Retry
 
@@ -91,14 +93,15 @@ Not applicable — no network request is made by `execute()`.
 
 ### Stage 1 — Ping probe replacement (must pass before August 13, 2026)
 
-1. Given a reachable node, when `client.ping(nodeId)` is called, then the probe uses `NetworkService/getVersionInfo` and not `CryptoService/cryptoGetBalance`.
-2. Given `client.pingAll()` is called, then all nodes are probed using `NetworkService/getVersionInfo`.
-3. Given a reachable node, when `client.ping(nodeId)` completes, then the node's backoff state is updated (existing ping behaviour is preserved).
-4. Given Solo's readiness checks run after Stage 1 is deployed, then all connectivity tests pass.
+1. Given a reachable node, when `client.ping(nodeId)` is called, then the probe uses `CryptoService/getTransactionReceipts` with `TransactionID` `0.0.0@0.0` and not `CryptoService/cryptoGetBalance`.
+2. Given a reachable node, when `client.ping(nodeId)` is called, then a `RECEIPT_NOT_FOUND` response is treated as success.
+3. Given `client.pingAll()` is called, then all nodes are probed using `CryptoService/getTransactionReceipts`.
+4. Given a reachable node, when `client.ping(nodeId)` completes, then the node's backoff state is updated (existing ping behaviour is preserved).
+5. Given Solo's readiness checks run after Stage 1 is deployed, then all connectivity tests pass.
 
 #### TCK — Stage 1
 
-Tests 1–3 should have corresponding issues in `hiero-ledger/hiero-sdk-tck`. Test 1 is the critical integration check — it confirms the gRPC probe has switched. All tests must be validated against a live network.
+Tests 1–4 should have corresponding issues in `hiero-ledger/hiero-sdk-tck` and must be validated against a live network. Test 1 is the critical integration check — it confirms the probe has switched. Test 5 is a Solo-level integration check and is not a TCK test.
 
 ### Stage 2 — AccountBalanceQuery deprecation (must pass before September 9, 2026)
 
