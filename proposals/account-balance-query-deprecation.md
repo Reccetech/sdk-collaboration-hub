@@ -9,7 +9,7 @@ This proposal deprecates `AccountBalanceQuery` across all Hiero SDKs: the class 
 ### Delivery stages
 
 **Stage 1 — Replace the `ping()` / `pingAll()` probe (before August 13, 2026)**
-Replace the `AccountBalanceQuery` liveness probe inside `Client.ping()` and `Client.pingAll()` with `TransactionReceiptQuery` using `TransactionID` `0.0.0@0.0`. This is a purely internal change with no public API impact. It must ship before the release 77 testnet rollout to avoid breaking Solo readiness checks and connectivity tests.
+Replace the `AccountBalanceQuery` liveness probe inside `Client.ping()` and `Client.pingAll()` with a `COST_ANSWER` query. This is a purely internal change with no public API impact. It must ship before the release 77 testnet rollout to avoid breaking Solo readiness checks and connectivity tests.
 
 **Stage 2 — Deprecate `AccountBalanceQuery` in the SDK (at or before September 9, 2026)**
 Mark `AccountBalanceQuery` deprecated and override `execute()` to throw immediately. Stage 2 can ship independently of Stage 1 in any release, but Stage 1 must be complete first.
@@ -77,7 +77,7 @@ Error: AccountBalanceQuery is no longer supported. Use the mirror node REST API 
 
 ### `Client.ping()` / `Client.pingAll()` — Stage 1
 
-All SDKs must replace the `AccountBalanceQuery` probe inside `ping()` and `pingAll()` with `TransactionReceiptQuery` (`CryptoService/getTransactionReceipts`) using the fixed `TransactionID` `0.0.0@0.0`. This ID can never exist: account `0.0.0` is not created on the network and Unix epoch 0 predates Hedera's September 2019 mainnet launch. The query is free and available on every consensus node. A healthy node returns `RECEIPT_NOT_FOUND`; the probe treats this as success. A node that is degraded or unreachable fails at the gRPC layer, which the probe treats as failure. All SDKs already have `TransactionReceiptQuery` wrapper classes.
+All SDKs must replace the `AccountBalanceQuery` probe inside `ping()` and `pingAll()` with a `CryptoService/getAccountInfo` request for account `0.0.2` with `ResponseType = COST_ANSWER`. Setting `COST_ANSWER` instructs the node to return the query fee without executing it — no HBAR is charged. A healthy node returns a cost response, which the probe treats as success. A node that is degraded or unreachable fails at the gRPC layer, which the probe treats as failure.
 
 The standard gRPC health check protocol (`grpc.health.v1.Health/Check`) was evaluated and confirmed not implemented on Hedera consensus nodes (verified against 5 mainnet nodes, July 2026).
 
@@ -93,9 +93,9 @@ Not applicable — no network request is made by `execute()`.
 
 ### Stage 1 — Ping probe replacement (must pass before August 13, 2026)
 
-1. Given a reachable node, when `client.ping(nodeId)` is called, then the probe uses `CryptoService/getTransactionReceipts` with `TransactionID` `0.0.0@0.0` and not `CryptoService/cryptoGetBalance`.
-2. Given a reachable node, when `client.ping(nodeId)` is called, then a `RECEIPT_NOT_FOUND` response is treated as success.
-3. Given `client.pingAll()` is called, then all nodes are probed using `CryptoService/getTransactionReceipts`.
+1. Given a reachable node, when `client.ping(nodeId)` is called, then the probe sends `CryptoService/getAccountInfo` for account `0.0.2` with `ResponseType = COST_ANSWER` and not `CryptoService/cryptoGetBalance`.
+2. Given a reachable node, when `client.ping(nodeId)` is called, then a cost response is returned and treated as success.
+3. Given `client.pingAll()` is called, then all nodes are probed using `CryptoService/getAccountInfo` with `ResponseType = COST_ANSWER`.
 4. Given a reachable node, when `client.ping(nodeId)` completes, then the node's backoff state is updated (existing ping behaviour is preserved).
 5. Given Solo's readiness checks run after Stage 1 is deployed, then all connectivity tests pass.
 
