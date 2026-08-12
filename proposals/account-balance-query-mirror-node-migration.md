@@ -2,48 +2,47 @@
 
 ## Summary
 
-`AccountBalanceQuery` currently retrieves HBAR and token balances by issuing a free gRPC call to a consensus node (`CryptoService/cryptoGetBalance`). The Hedera network is deprecating this endpoint. This proposal introduces a replacement query, `MirrorNodeAccountBalanceQuery`, that fetches the same data from the mirror node REST API (`GET /api/v1/accounts/{idOrAliasOrEvmAddress}`), and simultaneously deprecates `AccountBalanceQuery`.
+`AccountBalanceQuery` currently retrieves HBAR balances by issuing a free gRPC call to a consensus node (`CryptoService/cryptoGetBalance`). The Hedera network is deprecating this endpoint. This proposal introduces a replacement query, `MirrorNodeAccountBalanceQuery`, that fetches HBAR balance from the mirror node REST API (`GET /api/v1/balances?account.id={id}`), and simultaneously deprecates `AccountBalanceQuery`.
 
 The new class follows the naming and structural convention already established in the SDKs for mirror node REST queries (`MirrorNodeContractCallQuery`, `MirrorNodeContractEstimateQuery`). The existing `AccountBalanceQuery` is marked deprecated but not removed, giving developers a migration window. A future `BlockNodeAccountBalanceQuery` is noted as a named placeholder for when block node infrastructure is available across the network.
-
-**Relationship to the companion proposal:** The companion [AccountBalanceQuery Deprecation](./account-balance-query-deprecation.md) proposal makes `execute()` fail immediately with a hard error, while this proposal keeps `AccountBalanceQuery` fully functional during a migration window. The two are mutually exclusive strategies for retiring the consensus-node balance path; only one of them can be adopted.
 
 **Date Submitted:** 2026-07-15
 
 **Related references:**
 - [Hedera blog: Migrating from AccountBalanceQuery](https://hedera.com/blog/migrating-from-accountbalancequery-what-you-need-to-know/)
-- [Mirror node REST docs: GET /api/v1/accounts/{id}](https://docs.hedera.com/hedera/sdks-and-apis/rest-api#accounts)
-- [Mirror node REST docs: GET /api/v1/contracts/{id}](https://docs.hedera.com/hedera/sdks-and-apis/rest-api#contracts)
-- [Docs: Get Account Token Balance](https://docs.hedera.com/native/tokens/get-balance#get-account-token-balance)
+- [Mirror node REST docs: GET /api/v1/balances](https://docs.hedera.com/hedera/sdks-and-apis/rest-api#balances)
 
 ---
 
 ## New APIs
 
-### `MirrorNodeAccountBalanceQuery`
+### `MirrorNodeAccountBalance`
 
-A new standalone query class that fetches account or contract balance from the mirror node REST API. Does not extend the base `Query` class (which carries consensus-node gRPC machinery). Follows the same pattern as `MirrorNodeContractCallQuery`.
+A new read-only data class returned by `MirrorNodeAccountBalanceQuery`. Returns HBAR balance only; token balances are not included (see Internal Changes).
 
 ```
-@@oneOrNoneOf(accountId, contractId)
-MirrorNodeAccountBalanceQuery {
-    @@nullable accountId: AccountId
-    @@nullable contractId: ContractId
-
-    MirrorNodeAccountBalanceQuery setAccountId(accountId: AccountId)
-    MirrorNodeAccountBalanceQuery setContractId(contractId: ContractId)
-
-    @@async
-    @@throws(invalid-argument-error, not-found-error)
-    AccountBalance execute(client: Client)
+@@finalType
+MirrorNodeAccountBalance {
+    @@immutable hbars: Hbar
 }
 ```
 
-`accountId` accepts any form the SDK's `AccountId` string parsing accepts: `shard.realm.num`, EVM address
-(`0x...`), or public key alias. The mirror node natively resolves all three, which is an improvement over the
-consensus node path.
+### `MirrorNodeAccountBalanceQuery`
 
-Setting `contractId` routes the query to `GET /api/v1/contracts/{contractId}` instead; see Internal Changes.
+A new standalone query class that fetches HBAR balance from the mirror node REST API. Does not extend the base `Query` class (which carries consensus-node gRPC machinery). Follows the same pattern as `MirrorNodeContractCallQuery`.
+
+`setAccountId` accepts `shard.realm.num`, EVM address (`0x...`), or public key alias — all resolved natively by the mirror node. Contract IDs are also accepted as the balances endpoint supports them; no separate `setContractId` method is needed.
+
+```
+MirrorNodeAccountBalanceQuery {
+    @@nullable accountId: AccountId
+
+    MirrorNodeAccountBalanceQuery setAccountId(accountId: AccountId)
+
+    @@async
+    MirrorNodeAccountBalance execute(client: Client)
+}
+```
 
 ### Future placeholder: `BlockNodeAccountBalanceQuery`
 
@@ -55,37 +54,20 @@ A `BlockNodeAccountBalanceQuery` class is reserved for a future proposal once bl
 
 ### `AccountBalanceQuery` — deprecated
 
-`AccountBalanceQuery` is marked deprecated across all SDKs. Its implementation and behavior are **unchanged** — it continues to issue gRPC calls to consensus nodes for the duration of the deprecation window. No fields or methods are removed. SDKs should emit a deprecation warning on construction or first `execute()` call pointing developers to `MirrorNodeAccountBalanceQuery`.
+`AccountBalanceQuery` is marked deprecated across all SDKs. Its implementation and behavior are unchanged — it continues to issue gRPC calls to consensus nodes for the duration of the deprecation window. No fields or methods are removed. SDKs should emit a deprecation warning on construction pointing developers to `MirrorNodeAccountBalanceQuery`.
 
 ```
 @@oneOrNoneOf(accountId, contractId)
 AccountBalanceQuery {
-    @@nullable accountId: AccountId     // unchanged
-    @@nullable contractId: ContractId   // unchanged
+    @@nullable accountId: AccountId
+    @@nullable contractId: ContractId
 
     AccountBalanceQuery setAccountId(accountId: AccountId)
     AccountBalanceQuery setContractId(contractId: ContractId)
 
     @@async
+    @@throws(deprecated-query-error)
     AccountBalance execute(client: Client)
-}
-```
-
-The meta-language defines no deprecation annotation; each SDK marks the class deprecated in its idiomatic way
-(e.g., JSDoc `@deprecated`, Java `@Deprecated`, Rust `#[deprecated]`).
-
-### `AccountBalance` — `tokenDecimals` deprecated
-
-`tokenDecimals` is retained on `AccountBalance` so that existing code using `AccountBalanceQuery` continues to
-compile and run unchanged during the deprecation window. When using the new `MirrorNodeAccountBalanceQuery`,
-`tokenDecimals` will always be empty (the mirror node account balance endpoint does not return decimals). SDKs
-should mark it deprecated in their idiomatic way.
-
-```
-AccountBalance {
-    hbars: Hbar                     // unchanged
-    tokens: TokenBalanceMap         // unchanged
-    tokenDecimals: TokenDecimalMap  // deprecated — empty when returned by MirrorNodeAccountBalanceQuery
 }
 ```
 
@@ -95,52 +77,38 @@ AccountBalance {
 
 ### `MirrorNodeAccountBalanceQuery` implementation
 
-The class does not extend `Query`. It uses the SDK's HTTP abstraction and the mirror node REST base URL from the
-client's mirror network configuration, following the structure of the existing mirror node REST queries
-(precedent in the JS SDK: `MirrorNodeContractCallQuery`, `FeeEstimateQuery`).
+The class does not extend `Query`. It uses `fetch` (or the SDK's equivalent HTTP abstraction) and `client.mirrorRestApiBaseUrl`, following the same structure as `MirrorNodeContractCallQuery` and `FeeEstimateQuery`.
 
-**Request routing:**
+**Endpoint:** `GET /api/v1/balances?account.id={accountId}`
 
-1. If `accountId` is set:
-   - Issue `GET /api/v1/accounts/{accountId}` where `accountId` is the string form of the `AccountId`
-     (shard.realm.num, EVM address, or alias — all accepted by the mirror node).
-   - Parse `balance.balance` (tinybars) → `AccountBalance.hbars`.
-   - Issue `GET /api/v1/accounts/{accountId}/tokens` and follow `links.next` until it is absent, accumulating
-     all entries into `AccountBalance.tokens` (`TokenBalanceMap`). The `balance.tokens` array embedded in the
-     account response is a truncated preview and must not be used as the source of token balances.
-   - Leave `AccountBalance.tokenDecimals` empty.
+The `account.id` parameter accepts `shard.realm.num`, EVM address, public key alias, and contract ID — the mirror node resolves all forms. Parse `balances[0].balance` (tinybars) → `MirrorNodeAccountBalance.hbars`.
 
-2. If `contractId` is set:
-   - Issue `GET /api/v1/contracts/{contractId}`.
-   - Parse `balance` (tinybars) → `AccountBalance.hbars`.
-   - Return an empty `TokenBalanceMap` (the mirror node contracts endpoint does not expose token balances).
-
-**Mirror response shape (tokens path):**
+**Mirror response shape:**
 
 ```json
 {
-  "tokens": [
-    { "token_id": "0.0.12345", "balance": 500 },
-    { "token_id": "0.0.67890", "balance": 100 }
+  "timestamp": "1234567890.000000000",
+  "balances": [
+    {
+      "account": "0.0.12345",
+      "balance": 123456789
+    }
   ],
-  "links": { "next": "/api/v1/accounts/0.0.12345/tokens?limit=25&..." }
+  "links": { "next": null }
 }
 ```
 
-### Why `tokenDecimals` cannot be populated
+### Why token balances are not returned
 
-The mirror node `GET /api/v1/accounts/{id}` response does not include token decimals. Retrieving them would require one `GET /api/v1/tokens/{tokenId}` call per token held — an unbounded number of extra calls for accounts with large token portfolios. `tokenDecimals` is therefore empty when using `MirrorNodeAccountBalanceQuery`. Developers who need decimals should use a `TokenInfoQuery` (or equivalent) per token.
+The `/api/v1/balances` endpoint does not paginate token balances. Fetching all token balances would require following unbounded pagination against `/api/v1/accounts/{id}/tokens` — a DDoS risk for accounts with large token portfolios and an unnecessary cost for callers who only need HBAR. Token balances are therefore out of scope for this class.
 
-### Pagination
+### Non-existent account
 
-Token balances are paginated by the mirror node. `MirrorNodeAccountBalanceQuery` must follow `links.next` on
-`GET /api/v1/accounts/{id}/tokens` until it is absent, accumulating all token entries before constructing the
-`TokenBalanceMap`. Note that `links.next` on the account endpoint itself paginates the account's transactions,
-not its token balances.
+The balances endpoint returns an empty `balances` array for an account that does not exist (no 404). `MirrorNodeAccountBalanceQuery` returns a `MirrorNodeAccountBalance` with `hbars = 0` in this case.
 
 ### Eventual consistency
 
-The mirror node reflects network state with a small lag (typically seconds). `AccountBalanceQuery` (consensus node) returns data current as of the latest handled block. Applications that require immediate post-transaction balance confirmation should allow for this lag when using `MirrorNodeAccountBalanceQuery`. This should be documented in SDK release notes.
+The mirror node reflects network state with a small lag (typically seconds). Applications that require immediate post-transaction balance confirmation should allow for this lag. This should be documented in SDK release notes.
 
 ### Free query — no change
 
@@ -150,13 +118,12 @@ Both `AccountBalanceQuery` and `MirrorNodeAccountBalanceQuery` are free. No paym
 
 No consensus node response codes apply to `MirrorNodeAccountBalanceQuery`. Mirror node HTTP errors:
 
-- `400 Bad Request` — invalid ID format. Surface as an SDK-appropriate error with a clear message. Do not retry.
-- `404 Not Found` — account or contract does not exist. Surface as an SDK-appropriate error. Do not retry.
+- `400 Bad Request` — invalid ID format. Surface as an SDK-appropriate error. Do not retry.
 - `500 / 503 / 504` — transient mirror node error. Retry with the same backoff policy used by `FeeEstimateQuery`.
 
 #### Transaction Retry
 
-Mirror node retries follow existing mirror REST retry policy (`isRetryableNetworkError`): retry on 500/503/504 and network-level failures; do not retry on 400/404.
+Mirror node retries follow existing mirror REST retry policy (`isRetryableNetworkError`): retry on 500/503/504 and network-level failures; do not retry on 400.
 
 ---
 
@@ -164,39 +131,25 @@ Mirror node retries follow existing mirror REST retry policy (`isRetryableNetwor
 
 Tests apply to `MirrorNodeAccountBalanceQuery` unless otherwise noted.
 
-1. Given a valid account ID with a non-zero HBAR balance, when `MirrorNodeAccountBalanceQuery` is executed, then `AccountBalance.hbars` matches the account's current HBAR balance as returned by the mirror node.
-
-2. Given a valid account ID that holds fungible tokens, when `MirrorNodeAccountBalanceQuery` is executed, then `AccountBalance.tokens` contains each token ID with the correct raw balance amount.
-
-3. Given a valid account ID expressed as an EVM address string, when `MirrorNodeAccountBalanceQuery` is executed with `setAccountId(evmAddress)`, then the query resolves correctly and returns the HBAR and token balances for that account.
-
-4. Given a valid account ID expressed as a public key alias string, when `MirrorNodeAccountBalanceQuery` is executed with `setAccountId(alias)`, then the query resolves correctly and returns the HBAR balance.
-
-5. Given a valid contract ID, when `MirrorNodeAccountBalanceQuery` is executed with `setContractId(contractId)`, then `AccountBalance.hbars` reflects the contract's current HBAR balance and `AccountBalance.tokens` is empty.
-
-6. Given any account ID, when `MirrorNodeAccountBalanceQuery` is executed, then `AccountBalance.tokenDecimals` is always empty, confirming decimals are not populated.
-
-7. Given a non-existent account ID, when `MirrorNodeAccountBalanceQuery` is executed, then the SDK throws a clear error indicating the account was not found (mirror node 404).
-
-8. Given a malformed account ID string, when `MirrorNodeAccountBalanceQuery` is executed, then the SDK throws an error indicating invalid input before making a network call.
-
-9. Given a mirror node that returns a transient 503 error on the first attempt, when `MirrorNodeAccountBalanceQuery` is executed, then the SDK retries and returns the correct result on a subsequent attempt.
-
-10. Given an account that holds more than the mirror node's per-page token limit, when `MirrorNodeAccountBalanceQuery` is executed, then all token balances across all pages are returned in `AccountBalance.tokens`.
-
-11. Given a call to the deprecated `AccountBalanceQuery`, when it is constructed or executed, then the SDK emits a deprecation warning directing the developer to `MirrorNodeAccountBalanceQuery`.
-
-12. Given a call to the deprecated `AccountBalanceQuery`, when it is executed, then it still returns a correct result via the consensus node gRPC path (no behavioral regression during the deprecation window).
+1. Given a valid account ID with a non-zero HBAR balance, when `MirrorNodeAccountBalanceQuery` is executed, then `MirrorNodeAccountBalance.hbars` matches the account's current HBAR balance as returned by the mirror node.
+2. Given a valid account ID expressed as an EVM address, when `MirrorNodeAccountBalanceQuery` is executed, then the query resolves correctly and returns the HBAR balance.
+3. Given a valid account ID expressed as a public key alias, when `MirrorNodeAccountBalanceQuery` is executed, then the query resolves correctly and returns the HBAR balance.
+4. Given a valid contract ID passed as `accountId`, when `MirrorNodeAccountBalanceQuery` is executed, then `MirrorNodeAccountBalance.hbars` reflects the contract's current HBAR balance.
+5. Given a non-existent account ID, when `MirrorNodeAccountBalanceQuery` is executed, then `MirrorNodeAccountBalance.hbars` is zero (empty balances array from mirror node).
+6. Given a malformed account ID string, when `MirrorNodeAccountBalanceQuery` is executed, then the SDK throws an error before making a network call.
+7. Given a mirror node that returns a transient 503 error on the first attempt, when `MirrorNodeAccountBalanceQuery` is executed, then the SDK retries and returns the correct result on a subsequent attempt.
+8. Given a call to the deprecated `AccountBalanceQuery`, when it is constructed, then the SDK emits a deprecation warning directing the developer to `MirrorNodeAccountBalanceQuery`.
+9. Given a call to the deprecated `AccountBalanceQuery`, when it is executed, then it returns a correct result via the consensus node gRPC path (no behavioral regression during the deprecation window).
 
 ### TCK
 
-The above tests should each have a corresponding issue created in `hiero-ledger/hiero-sdk-tck` and linked back to this design doc. Tests 3, 4, and 10 exercise capabilities not covered by the legacy consensus-node path and should be prioritized.
+Tests 1–7 should each have a corresponding issue in `hiero-ledger/hiero-sdk-tck`. Tests 2 and 3 exercise identifier formats not covered by the legacy consensus-node path and should be prioritized.
 
 ---
 
 ## SDK Example
 
-### HBAR and token balances (new API)
+### HBAR balance (new API)
 
 ```javascript
 import { MirrorNodeAccountBalanceQuery, Client } from "@hiero-ledger/sdk";
@@ -208,29 +161,28 @@ const balance = await new MirrorNodeAccountBalanceQuery()
     .execute(client);
 
 console.log(`HBAR balance: ${balance.hbars.toString()}`);
-
-for (const [tokenId, amount] of balance.tokens) {
-    console.log(`Token ${tokenId.toString()}: ${amount.toString()}`);
-}
 ```
 
-### Lookup by EVM address (new capability)
+### Lookup by EVM address or alias
 
 ```javascript
+// EVM address
 const balance = await new MirrorNodeAccountBalanceQuery()
-    .setAccountId("0x0000000000000000000000000000000000bc614e")
+    .setAccountId("0x00000000000000000000000000000000000bc614e")
     .execute(client);
 
-console.log(`HBAR balance: ${balance.hbars.toString()}`);
+// Public key alias
+const balance = await new MirrorNodeAccountBalanceQuery()
+    .setAccountId("0.0.302a300506032b6570032100e0c8ec2758a5879ffac226a13c0c516b799e72e35141a905d7822d6526b870d")
+    .execute(client);
 ```
 
-### Contract balance
+### Contract HBAR balance
 
 ```javascript
-import { MirrorNodeAccountBalanceQuery, ContractId, Client } from "@hiero-ledger/sdk";
-
+// Pass a contract ID via setAccountId — the balances endpoint supports contract IDs
 const balance = await new MirrorNodeAccountBalanceQuery()
-    .setContractId("0.0.98765")
+    .setAccountId("0.0.98765")
     .execute(client);
 
 console.log(`Contract HBAR balance: ${balance.hbars.toString()}`);
@@ -241,34 +193,15 @@ console.log(`Contract HBAR balance: ${balance.hbars.toString()}`);
 ```javascript
 // Before — deprecated
 import { AccountBalanceQuery } from "@hiero-ledger/sdk";
-
 const balance = await new AccountBalanceQuery()  // emits deprecation warning
     .setAccountId(accountId)
     .execute(client);
 
-// After — use MirrorNodeAccountBalanceQuery
+// After
 import { MirrorNodeAccountBalanceQuery } from "@hiero-ledger/sdk";
-
-const balance = await new MirrorNodeAccountBalanceQuery()
-    .setAccountId(accountId)
-    .execute(client);
-```
-
-### Fetching token decimals separately (if needed)
-
-`MirrorNodeAccountBalanceQuery` does not populate `tokenDecimals`. Use `TokenInfoQuery` per token if decimals are required.
-
-```javascript
-import { MirrorNodeAccountBalanceQuery, TokenInfoQuery } from "@hiero-ledger/sdk";
-
 const balance = await new MirrorNodeAccountBalanceQuery()
     .setAccountId(accountId)
     .execute(client);
 
-// balance.tokenDecimals is empty — fetch decimals separately
-const tokenInfo = await new TokenInfoQuery()
-    .setTokenId(myTokenId)
-    .execute(client);
-
-console.log(`Decimals: ${tokenInfo.decimals}`);
+console.log(balance.hbars.toString());
 ```
