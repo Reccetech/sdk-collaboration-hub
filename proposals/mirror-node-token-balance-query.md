@@ -21,21 +21,25 @@ This is a follow-on to `MirrorNodeAccountBalanceQuery` and should be implemented
 
 ### `MirrorNodeTokenBalance`
 
-A read-only data class representing a single token balance for an account.
+A read-only data class representing a single token relationship entry as returned by the mirror node. Fields map 1:1 to the mirror node `TokenRelationship` schema — no fields are filtered or projected. A developer using the SDK gets the same data as one calling the REST API directly.
 
 ```
 @@finalType
 MirrorNodeTokenBalance {
-    @@immutable tokenId: TokenId
-    @@immutable balance: Long    // raw balance in the token's smallest denomination
-    @@immutable decimals: int    // number of decimal places for the token
+    @@immutable tokenId:                TokenId
+    @@immutable balance:                Long      // raw units in the token's smallest denomination
+    @@nullable @@immutable decimals:    int       // decimal places; null for NFTs
+    @@nullable @@immutable automaticAssociation: Boolean
+    @@nullable @@immutable createdTimestamp:     String    // e.g. "1234567890.000000000"
+    @@nullable @@immutable freezeStatus:         String    // NOT_APPLICABLE | FROZEN | UNFROZEN
+    @@immutable kycStatus:             String    // NOT_APPLICABLE | GRANTED | REVOKED
 }
 ```
 
-`balance` is the raw on-chain value in the token's smallest unit. To get a human-readable amount, divide by `10^decimals`. This matches the behaviour of the existing `AccountBalance.tokens` map, which also returned raw balances.
+`balance` is the raw on-chain value. For fungible tokens, divide by `10^decimals` for a human-readable amount. For NFTs, `balance` is the count of NFTs held and `decimals` is null.
 
 **Design note — consolidation of balance and decimals:**
-The existing `AccountBalance` type split token data across two separate maps: `tokens: TokenBalanceMap` (balance keyed by `TokenId`) and `tokenDecimals: TokenDecimalMap` (decimals keyed by `TokenId`). `MirrorNodeTokenBalance` consolidates both into a single object per token — balance and decimals are always available together. SDK teams implementing this type do not need to replicate the split-map pattern.
+The existing `AccountBalance` type split token data across two separate maps: `tokens: TokenBalanceMap` (balance keyed by `TokenId`) and `tokenDecimals: TokenDecimalMap` (decimals keyed by `TokenId`). `MirrorNodeTokenBalance` consolidates both into a single object per token alongside the full token relationship context. SDK teams implementing this type do not need to replicate the split-map pattern.
 
 ---
 
@@ -116,7 +120,7 @@ GET /api/v1/accounts/{accountId}/tokens?limit=100&order=asc
 GET {nextPage}   // use the links.next URL verbatim — do not reconstruct it
 ```
 
-**Mirror response shape per token:**
+**Mirror response shape per token (`TokenRelationship` schema):**
 ```json
 {
   "token_id": "0.0.12345",
@@ -129,7 +133,19 @@ GET {nextPage}   // use the links.next URL verbatim — do not reconstruct it
 }
 ```
 
-Parse `token_id` → `TokenId`, `balance` → `Long`, `decimals` → `int`. Map `links.next` → `MirrorNodeTokenBalancePage.next` (null when absent). The remaining fields (`automatic_association`, `created_timestamp`, `freeze_status`, `kyc_status`) are out of scope for a balance query and are not exposed on `MirrorNodeTokenBalance`.
+All fields are mapped to `MirrorNodeTokenBalance` with no filtering:
+
+| Mirror node field       | SDK field             | Type                        |
+|-------------------------|-----------------------|-----------------------------|
+| `token_id`              | `tokenId`             | `TokenId`                   |
+| `balance`               | `balance`             | `Long`                      |
+| `decimals`              | `decimals`            | `int` (nullable for NFTs)   |
+| `automatic_association` | `automaticAssociation`| `Boolean` (nullable)        |
+| `created_timestamp`     | `createdTimestamp`    | `String` (nullable)         |
+| `freeze_status`         | `freezeStatus`        | `String` (nullable)         |
+| `kyc_status`            | `kycStatus`           | `String`                    |
+
+Map `links.next` → `MirrorNodeTokenBalancePage.next` (null when absent). This type corresponds directly to the mirror node's `TokenRelationship` OpenAPI schema — SDK teams may choose to generate it from the spec rather than hand-writing it.
 
 ### Free query
 
@@ -186,8 +202,10 @@ const page = await new MirrorNodeTokenBalanceQuery()
     .execute(client);
 
 for (const token of page.tokens) {
-    const humanReadable = token.balance / Math.pow(10, token.decimals);
-    console.log(`${token.tokenId}: ${humanReadable}`);
+    const humanReadable = token.decimals != null
+        ? token.balance / Math.pow(10, token.decimals)
+        : token.balance; // NFT — balance is count
+    console.log(`${token.tokenId}: ${humanReadable} (freeze: ${token.freezeStatus}, kyc: ${token.kycStatus})`);
 }
 ```
 
