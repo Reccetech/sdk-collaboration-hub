@@ -4,7 +4,7 @@
 
 `AccountBalanceQuery` originally returned HBAR balance and token balances together. Token balance support was deprecated in Services release 0.50 (HIP-367), and `AccountBalanceQuery` itself is deprecated and will be removed with consensus node release 77 (estimated mainnet September 9, 2026). `MirrorNodeAccountBalanceQuery` replaces the HBAR path but intentionally omits token balances — the mirror node `/api/v1/accounts/{id}/tokens` endpoint paginates, and fetching a full token portfolio implicitly inside a single `execute()` call would make the cost invisible to the caller.
 
-This proposal introduces `MirrorNodeTokenBalanceQuery`: an SDK query for fetching token balances from the mirror node REST API. The query always requires an `accountId`, scoping it to a single account's finite set of token associations. An optional `tokenId` filter narrows the result to a single token and eliminates pagination entirely. The SDK handles all pagination internally; the caller always receives a complete list.
+This proposal introduces `MirrorNodeTokenBalanceQuery`: an SDK query for fetching token balances from the mirror node REST API. `execute()` returns one page of results (up to 100 tokens). Pagination is the caller's responsibility — the returned page exposes a cursor that the caller uses to fetch subsequent pages if needed. An optional `tokenId` filter narrows the result to a single token, eliminating pagination entirely.
 
 This is a follow-on to `MirrorNodeAccountBalanceQuery` and should be implemented after that class ships in all SDKs.
 
@@ -35,11 +35,30 @@ MirrorNodeTokenBalance {
 `balance` is the raw on-chain value in the token's smallest unit. To get a human-readable amount, divide by `10^decimals`. This matches the behaviour of the existing `AccountBalance.tokens` map, which also returned raw balances.
 
 **Design note — consolidation of balance and decimals:**
-The existing `AccountBalance` type split token data across two separate maps: `tokens: TokenBalanceMap` (balance keyed by `TokenId`) and `tokenDecimals: TokenDecimalMap` (decimals keyed by `TokenId`). `MirrorNodeTokenBalance` consolidates both into a single object per token — balance and decimals are always available together. This is a better design and eliminates the two-map lookup; SDK teams implementing this type do not need to replicate the split-map pattern.
+The existing `AccountBalance` type split token data across two separate maps: `tokens: TokenBalanceMap` (balance keyed by `TokenId`) and `tokenDecimals: TokenDecimalMap` (decimals keyed by `TokenId`). `MirrorNodeTokenBalance` consolidates both into a single object per token — balance and decimals are always available together. SDK teams implementing this type do not need to replicate the split-map pattern.
+
+---
+
+### `MirrorNodeTokenBalancePage`
+
+A read-only page of token balance results. Returned by `MirrorNodeTokenBalanceQuery.execute()`.
+
+```
+@@finalType
+MirrorNodeTokenBalancePage {
+    @@immutable List<MirrorNodeTokenBalance> tokens
+
+    // Null when there are no more pages. Pass to a new execute() call via
+    // setNextPage() to fetch the next page.
+    @@nullable @@immutable String next
+}
+```
+
+---
 
 ### `MirrorNodeTokenBalanceQuery`
 
-A new standalone query class that fetches token balances from the mirror node REST API. Does not extend the base `Query` class. Follows the same pattern as `MirrorNodeAccountBalanceQuery`.
+A new standalone query class that fetches one page of token balances from the mirror node REST API. Does not extend the base `Query` class. Follows the same pattern as `MirrorNodeAccountBalanceQuery`.
 
 `setAccountId` accepts `shard.realm.num`, EVM address (`0x...`), or public key alias — all resolved natively by the mirror node.
 
@@ -47,25 +66,32 @@ A new standalone query class that fetches token balances from the mirror node RE
 MirrorNodeTokenBalanceQuery {
     @@nullable accountId: AccountId
     @@nullable tokenId: TokenId
+    @@nullable nextPage: String
 
     // Required — throws before any network call if not set.
     MirrorNodeTokenBalanceQuery setAccountId(accountId: AccountId)
 
-    // Optional. If set, fetches only this token (single request, no pagination).
-    // If not set, fetches all token balances for the account (SDK paginates internally).
+    // Optional. If set, fetches only this token (single request, next = null).
     MirrorNodeTokenBalanceQuery setTokenId(tokenId: TokenId)
 
+    // Optional. Set to MirrorNodeTokenBalancePage.next to fetch a subsequent page.
+    // Must not be combined with setTokenId.
+    MirrorNodeTokenBalanceQuery setNextPage(next: String)
+
     @@async
-    List<MirrorNodeTokenBalance> execute(client: Client)
+    MirrorNodeTokenBalancePage execute(client: Client)
 }
 ```
 
-**`execute` return value:**
-- When `tokenId` is set: one request, no pagination. Returns a list of 0 or 1 items. SDK does not follow `links.next`.
-- When `tokenId` is not set: SDK follows `links.next` cursor (`token.id=gt:{last_id}`) until null. Returns the complete list of token balances for the account.
+**`execute` behaviour:**
+- Returns one page of up to 100 token balances.
+- When `tokenId` is set: single request, `page.next` is always `null`.
+- When `nextPage` is set: fetches the page at that cursor URL verbatim; `page.next` is `null` when the last page is reached. `accountId` is not required in this case — the account is already embedded in the cursor URL.
+- When neither is set: fetches the first page ordered ascending by token ID. `accountId` is required.
+- `setNextPage` and `setTokenId` must not be used together — throws before any network call if both are set.
 
-**Design note — return type (List vs Map):**
-`execute` returns `List<MirrorNodeTokenBalance>` rather than a map keyed by `TokenId`. A list preserves ordering from the mirror node response, is natural for iteration (wallet portfolio display), and avoids the ergonomic split of the existing `TokenBalanceMap` / `TokenDecimalMap` pair. For single-token lookups, `setTokenId` eliminates the need to search a list in the first place. SDK teams that have a strong convention around map-keyed balance types may choose to wrap the list in a `MirrorNodeTokenBalanceMap` type that exposes a `get(tokenId)` accessor — that is a valid implementation choice and does not change the wire behaviour described in this proposal.
+**Design note — return type:**
+`execute` returns `MirrorNodeTokenBalancePage` rather than a flat `List`. This makes the pagination cursor explicit and gives callers full control over how many pages they consume. SDK teams that have a strong convention around map-keyed balance types may choose to wrap `page.tokens` in a `MirrorNodeTokenBalanceMap` type that exposes a `get(tokenId)` accessor.
 
 ---
 
@@ -75,31 +101,20 @@ MirrorNodeTokenBalanceQuery {
 
 The class does not extend `Query`. It uses `fetch` (or the SDK's equivalent HTTP abstraction) and `client.mirrorRestApiBaseUrl`, following the same structure as `MirrorNodeAccountBalanceQuery` and `FeeEstimateQuery`.
 
-**Endpoint (single-token):**
+**Endpoint (single-token, `tokenId` set):**
 ```
 GET /api/v1/accounts/{accountId}/tokens?token.id={tokenId}&limit=100
 ```
-Use `limit=100` (not `limit=1`) so that `links.next` is null when the single result is returned. With `limit=1`, the mirror node echoes a non-null `links.next` even for a single-item result (see pagination note below). In either case, the SDK does not follow `links.next` when `tokenId` is set.
 
-**Endpoint (all tokens, first page):**
+**Endpoint (first page, no filter):**
 ```
 GET /api/v1/accounts/{accountId}/tokens?limit=100&order=asc
 ```
 
-**Pagination loop (no `tokenId` filter only):**
-
-The SDK follows `links.next` until `links.next` is null. The SDK requests 100 items per page. The cursor is embedded in `links.next` by the mirror node as a `token.id=gt:{last_id}` cursor — the SDK uses the URL verbatim rather than constructing it.
-
+**Endpoint (subsequent page, `nextPage` set):**
 ```
-GET /api/v1/accounts/{id}/tokens?limit=100&order=asc
-→ { tokens: [...100 items...], links: { next: "/api/v1/accounts/{id}/tokens?limit=100&token.id=gt:0.0.500" } }
-GET /api/v1/accounts/{id}/tokens?limit=100&token.id=gt:0.0.500&order=asc
-→ { tokens: [...remaining...], links: { next: null } }
+GET {nextPage}   // use the links.next URL verbatim — do not reconstruct it
 ```
-
-**Important — `links.next` behavior when `tokenId` filter is set:**
-
-When `setTokenId` is used, the SDK must NOT follow `links.next`. The mirror node echoes back a non-null `links.next` with the same `token.id=` filter even when the result fits within the page limit (e.g., `limit=1` returning one result). That echoed link is a filter reference, not a pagination cursor — following it loops indefinitely returning the same token. When `setTokenId` is set, `execute` is always a single request with no pagination regardless of `links.next`.
 
 **Mirror response shape per token:**
 ```json
@@ -109,20 +124,20 @@ When `setTokenId` is used, the SDK must NOT follow `links.next`. The mirror node
   "decimals": 6,
   "automatic_association": true,
   "created_timestamp": "1234567890.000000000",
-  "freeze_status": "UNFROZEN",
-  "kyc_status": "GRANTED"
+  "freeze_status": "NOT_APPLICABLE",
+  "kyc_status": "NOT_APPLICABLE"
 }
 ```
 
-Parse `token_id` → `TokenId`, `balance` → `Long`, `decimals` → `int`. The remaining fields (`automatic_association`, `created_timestamp`, `freeze_status`, `kyc_status`) are out of scope for a balance query and are not exposed on `MirrorNodeTokenBalance`.
+Parse `token_id` → `TokenId`, `balance` → `Long`, `decimals` → `int`. Map `links.next` → `MirrorNodeTokenBalancePage.next` (null when absent). The remaining fields (`automatic_association`, `created_timestamp`, `freeze_status`, `kyc_status`) are out of scope for a balance query and are not exposed on `MirrorNodeTokenBalance`.
 
 ### Free query
 
 `MirrorNodeTokenBalanceQuery` is free. No query payment or operator signing is required.
 
-### Non-existent account or token
+### Non-existent account
 
-The mirror node validates account existence before executing the token query. A non-existent account returns HTTP 404, which the SDK surfaces as an error. A valid account that does not hold the specified `tokenId` returns an empty list (no error).
+The mirror node `/api/v1/accounts/{id}/tokens` endpoint returns HTTP 404 when the account does not exist (verified against testnet and mainnet). The SDK surfaces this as an SDK-appropriate error. A valid account that does not hold the specified `tokenId` returns an empty `tokens` array with `next = null` (no error).
 
 ### Eventual consistency
 
@@ -136,57 +151,76 @@ No consensus node response codes apply. Mirror node HTTP errors:
 - `404 Not Found` — account does not exist. Surface as an SDK-appropriate error. Do not retry.
 - `500 / 503` — transient mirror node error. Retry with the same backoff policy used by `MirrorNodeAccountBalanceQuery`.
 
-Retries apply per-page — a transient failure mid-pagination retries the failed page, not the entire query from the start.
-
 ---
 
 ## Test Plan
 
-1. Given a valid account ID with multiple token associations and no `tokenId` filter, when `execute()` is called, then all token balances for the account are returned.
-2. Given a valid account ID and a `tokenId` the account holds, when `execute()` is called with `setTokenId`, then exactly one `MirrorNodeTokenBalance` is returned with the correct balance and decimals.
-3. Given a valid account ID and a `tokenId` the account does not hold, when `execute()` is called with `setTokenId`, then an empty list is returned.
-4. Given a non-existent account ID, when `execute()` is called, then an error is thrown (mirror node returns 404).
-5. Given no `accountId` is set, when `execute()` is called, then an error is thrown before any network call.
-6. Given a malformed account ID string, when `execute()` is called, then an SDK error is thrown before any network call.
-7. Given a mirror node that returns a transient 503 on one page mid-pagination, when `execute()` is called, then the SDK retries that page and returns the correct complete result.
-8. Given an account with token associations spanning multiple pages (more than 100 tokens), when `execute()` is called without `setTokenId`, then all tokens across all pages are returned.
-9. Given `setTokenId` is set, when `execute()` is called, then the SDK makes exactly one HTTP request regardless of the value of `links.next` in the response (the mirror node echoes a non-null `links.next` for filtered queries at small page sizes — the SDK must not follow it).
+1. Given a valid account ID with token associations and no `tokenId` filter, when `execute()` is called, then `page.tokens` contains up to 100 items and `page.next` is non-null when more pages exist.
+2. Given `page.next` is non-null, when a new `execute()` is called with `setNextPage(page.next)`, then the next page of tokens is returned with no overlap with the previous page.
+3. Given the last page, when `execute()` returns, then `page.next` is null.
+4. Given a valid account ID and a `tokenId` the account holds, when `execute()` is called with `setTokenId`, then `page.tokens` contains exactly one item with the correct balance and decimals, and `page.next` is null.
+5. Given a valid account ID and a `tokenId` the account does not hold, when `execute()` is called with `setTokenId`, then `page.tokens` is empty and `page.next` is null.
+6. Given a non-existent account ID, when `execute()` is called, then an error is thrown (mirror node returns 404).
+7. Given no `accountId` is set, when `execute()` is called, then an error is thrown before any network call.
+8. Given a malformed account ID string, when `execute()` is called, then an SDK error is thrown before any network call.
+9. Given both `setTokenId` and `setNextPage` are set, when `execute()` is called, then an error is thrown before any network call.
+10. Given a mirror node that returns a transient 503, when `execute()` is called, then the SDK retries and returns the correct result.
 
 ### TCK
 
-Tests 1–9 should have corresponding issues in `hiero-ledger/hiero-sdk-tck`. Test 7 (mid-pagination retry), test 8 (multi-page result), and test 9 (single-request enforcement when `tokenId` is set) are the critical integration checks for the pagination design.
+Tests 1–10 should have corresponding issues in `hiero-ledger/hiero-sdk-tck`. Tests 1–3 (pagination flow) and test 9 (invalid combination) are the critical integration checks for the new design.
 
 ---
 
 ## SDK Example
 
-### All token balances — wallet portfolio
+### Single page — first 100 tokens
 
 ```javascript
 import { MirrorNodeTokenBalanceQuery, Client } from "@hiero-ledger/sdk";
 
 const client = Client.forMainnet();
 
-const tokens = await new MirrorNodeTokenBalanceQuery()
+const page = await new MirrorNodeTokenBalanceQuery()
     .setAccountId("0.0.12345")
     .execute(client);
 
-for (const token of tokens) {
+for (const token of page.tokens) {
     const humanReadable = token.balance / Math.pow(10, token.decimals);
     console.log(`${token.tokenId}: ${humanReadable}`);
+}
+```
+
+### All pages — wallet portfolio
+
+```javascript
+let page = await new MirrorNodeTokenBalanceQuery()
+    .setAccountId("0.0.12345")
+    .execute(client);
+
+while (true) {
+    for (const token of page.tokens) {
+        const humanReadable = token.balance / Math.pow(10, token.decimals);
+        console.log(`${token.tokenId}: ${humanReadable}`);
+    }
+    if (page.next == null) break;
+    page = await new MirrorNodeTokenBalanceQuery()
+        .setNextPage(page.next)
+        .execute(client);
 }
 ```
 
 ### Single-token lookup
 
 ```javascript
-const result = await new MirrorNodeTokenBalanceQuery()
+const page = await new MirrorNodeTokenBalanceQuery()
     .setAccountId("0.0.12345")
     .setTokenId("0.0.98765")
     .execute(client);
 
-if (result.length > 0) {
-    console.log(`Balance: ${result[0].balance} (${result[0].decimals} decimals)`);
+if (page.tokens.length > 0) {
+    const token = page.tokens[0];
+    console.log(`Balance: ${token.balance} (${token.decimals} decimals)`);
 } else {
     console.log("Account does not hold this token");
 }
@@ -209,10 +243,11 @@ const hbarBalance = await new MirrorNodeAccountBalanceQuery()
     .setAccountId(accountId)
     .execute(client);
 
-// After — token balances
+// After — token balances (first page)
 import { MirrorNodeTokenBalanceQuery } from "@hiero-ledger/sdk";
-const tokenBalances = await new MirrorNodeTokenBalanceQuery()
+const page = await new MirrorNodeTokenBalanceQuery()
     .setAccountId(accountId)
     .execute(client);
-// List<MirrorNodeTokenBalance>, each with .tokenId, .balance, .decimals
+// page.tokens: List<MirrorNodeTokenBalance>, each with .tokenId, .balance, .decimals
+// page.next: String cursor for next page, or null if all tokens fit in one page
 ```
